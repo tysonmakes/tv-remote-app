@@ -1,4 +1,4 @@
-name: Build Android Remote APK
+name: Build TV Remote APK
 
 on:
   push:
@@ -19,11 +19,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Initialize Android App
+      - name: Create TV Remote App Code
         run: |
           mkdir -p app/src/main/java/com/example/tvremote
-          
-          # Write settings.gradle
+          mkdir -p app/src/main/res/values
+
+          # settings.gradle
           cat << 'EOF' > settings.gradle
           pluginManagement {
               repositories { google(); mavenCentral(); gradlePluginPortal() }
@@ -36,12 +37,9 @@ jobs:
           include ':app'
           EOF
 
-          # Write app/build.gradle
-          mkdir -p app
+          # app/build.gradle
           cat << 'EOF' > app/build.gradle
-          plugins {
-              id 'com.android.application'
-          }
+          plugins { id 'com.android.application' }
 
           android {
               namespace 'com.example.tvremote'
@@ -52,19 +50,24 @@ jobs:
                   minSdk 21
                   targetSdk 34
                   versionCode 1
-                  versionName "1.0"
+                  versionName "2.5"
               }
+          }
+
+          dependencies {
+              implementation 'com.google.android.material:material:1.11.0'
           }
           EOF
 
-          # Write Manifest
-          mkdir -p app/src/main
+          # AndroidManifest.xml
           cat << 'EOF' > app/src/main/AndroidManifest.xml
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
               <application
-                  android:label="TV Remote"
-                  android:theme="@android:style/Theme.DeviceDefault">
+                  android:label="Smart TV Controller"
+                  android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar">
                   <activity android:name=".MainActivity" android:exported="true">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
@@ -75,72 +78,208 @@ jobs:
           </manifest>
           EOF
 
-          # Write MainActivity
+          # MainActivity.java
           cat << 'EOF' > app/src/main/java/com/example/tvremote/MainActivity.java
           package com.example.tvremote;
 
           import android.app.Activity;
+          import android.content.Context;
+          import android.net.wifi.WifiManager;
           import android.os.Bundle;
-          import android.widget.Button;
-          import android.widget.EditText;
-          import android.widget.LinearLayout;
-          import android.widget.Toast;
+          import android.text.format.Formatter;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.widget.*;
           import java.io.OutputStream;
+          import java.net.InetSocketAddress;
           import java.net.Socket;
+          import java.util.concurrent.ExecutorService;
+          import java.util.concurrent.Executors;
 
           public class MainActivity extends Activity {
               private EditText ipInput;
+              private TextView statusText;
               private OutputStream out;
+              private final ExecutorService executor = Executors.newFixedThreadPool(12);
 
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  LinearLayout layout = new LinearLayout(this);
-                  layout.setOrientation(LinearLayout.VERTICAL);
-                  layout.setPadding(32, 32, 32, 32);
 
+                  ScrollView scrollView = new ScrollView(this);
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+                  root.setPadding(40, 40, 40, 40);
+
+                  TextView title = new TextView(this);
+                  title.setText("Smart TV Remote Control");
+                  title.setTextSize(22);
+                  title.setGravity(Gravity.CENTER);
+                  root.addView(title);
+
+                  statusText = new TextView(this);
+                  statusText.setText("Status: Disconnected");
+                  statusText.setGravity(Gravity.CENTER);
+                  statusText.setPadding(0, 10, 0, 20);
+                  root.addView(statusText);
+
+                  // Connection Bar
+                  LinearLayout connLayout = new LinearLayout(this);
                   ipInput = new EditText(this);
                   ipInput.setHint("TV IP Address");
-                  layout.addView(ipInput);
+                  ipInput.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+
+                  Button btnScan = new Button(this);
+                  btnScan.setText("Auto Scan");
+                  btnScan.setOnClickListener(v -> scanSubnet());
 
                   Button btnConnect = new Button(this);
                   btnConnect.setText("Connect");
-                  btnConnect.setOnClickListener(v -> connect());
-                  layout.addView(btnConnect);
+                  btnConnect.setOnClickListener(v -> connectToTv(ipInput.getText().toString().trim()));
 
-                  String[] keys = {"KEYCODE_DPAD_UP", "KEYCODE_DPAD_LEFT", "KEYCODE_DPAD_CENTER", "KEYCODE_DPAD_RIGHT", "KEYCODE_DPAD_DOWN", "KEYCODE_BACK", "KEYCODE_HOME"};
-                  String[] labels = {"Up", "Left", "OK", "Right", "Down", "Back", "Home"};
+                  connLayout.addView(ipInput);
+                  connLayout.addView(btnScan);
+                  connLayout.addView(btnConnect);
+                  root.addView(connLayout);
 
-                  for (int i = 0; i < keys.length; i++) {
-                      final String key = keys[i];
-                      Button btn = new Button(this);
-                      btn.setText(labels[i]);
-                      btn.setOnClickListener(v -> sendKey(key));
-                      layout.addView(btn);
+                  // Navigation Section
+                  root.addView(makeHeader("D-Pad Navigation"));
+                  root.addView(makeBtn("▲ UP", v -> sendKey("KEYCODE_DPAD_UP")));
+
+                  LinearLayout midDpad = new LinearLayout(this);
+                  midDpad.addView(makeFlexBtn("◄ LEFT", v -> sendKey("KEYCODE_DPAD_LEFT")));
+                  midDpad.addView(makeFlexBtn("SELECT", v -> sendKey("KEYCODE_DPAD_CENTER")));
+                  midDpad.addView(makeFlexBtn("RIGHT ►", v -> sendKey("KEYCODE_DPAD_RIGHT")));
+                  root.addView(midDpad);
+
+                  root.addView(makeBtn("▼ DOWN", v -> sendKey("KEYCODE_DPAD_DOWN")));
+
+                  // Essential Controls
+                  root.addView(makeHeader("System & Volume"));
+                  LinearLayout sysRow = new LinearLayout(this);
+                  sysRow.addView(makeFlexBtn("BACK", v -> sendKey("KEYCODE_BACK")));
+                  sysRow.addView(makeFlexBtn("HOME", v -> sendKey("KEYCODE_HOME")));
+                  sysRow.addView(makeFlexBtn("MUTE", v -> sendKey("KEYCODE_VOLUME_MUTE")));
+                  root.addView(sysRow);
+
+                  LinearLayout volRow = new LinearLayout(this);
+                  volRow.addView(makeFlexBtn("VOL -", v -> sendKey("KEYCODE_VOLUME_DOWN")));
+                  volRow.addView(makeFlexBtn("VOL +", v -> sendKey("KEYCODE_VOLUME_UP")));
+                  root.addView(volRow);
+
+                  // Media Controls
+                  root.addView(makeHeader("Media Playback"));
+                  LinearLayout mediaRow = new LinearLayout(this);
+                  mediaRow.addView(makeFlexBtn("◄◄ REV", v -> sendKey("KEYCODE_MEDIA_REWIND")));
+                  mediaRow.addView(makeFlexBtn("►|| PLAY/PAUSE", v -> sendKey("KEYCODE_MEDIA_PLAY_PAUSE")));
+                  mediaRow.addView(makeFlexBtn("FF ►►", v -> sendKey("KEYCODE_MEDIA_FAST_FORWARD")));
+                  root.addView(mediaRow);
+
+                  // App Shortcuts
+                  root.addView(makeHeader("Quick App Launchers"));
+                  LinearLayout appRow1 = new LinearLayout(this);
+                  appRow1.addView(makeFlexBtn("YouTube", v -> launchApp("com.google.android.youtube.tv")));
+                  appRow1.addView(makeFlexBtn("Netflix", v -> launchApp("com.netflix.ninja")));
+                  root.addView(appRow1);
+
+                  LinearLayout appRow2 = new LinearLayout(this);
+                  appRow2.addView(makeFlexBtn("Prime Video", v -> launchApp("com.amazon.amazonvideo.livingroom")));
+                  appRow2.addView(makeFlexBtn("Spotify", v -> launchApp("com.spotify.tv.android")));
+                  root.addView(appRow2);
+
+                  // Power Section
+                  root.addView(makeHeader("Power Options"));
+                  LinearLayout powerRow = new LinearLayout(this);
+                  powerRow.addView(makeFlexBtn("POWER TOGGLE", v -> sendKey("KEYCODE_POWER")));
+                  powerRow.addView(makeFlexBtn("REBOOT TV", v -> sendCommand("reboot\n")));
+                  root.addView(powerRow);
+
+                  scrollView.addView(root);
+                  setContentView(scrollView);
+              }
+
+              private TextView makeHeader(String text) {
+                  TextView tv = new TextView(this);
+                  tv.setText(text);
+                  tv.setTextSize(15);
+                  tv.setPadding(0, 25, 0, 10);
+                  return tv;
+              }
+
+              private Button makeBtn(String text, View.OnClickListener listener) {
+                  Button b = new Button(this);
+                  b.setText(text);
+                  b.setOnClickListener(listener);
+                  return b;
+              }
+
+              private Button makeFlexBtn(String text, View.OnClickListener listener) {
+                  Button b = makeBtn(text, listener);
+                  b.setLayoutParams(new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+                  return b;
+              }
+
+              private void scanSubnet() {
+                  statusText.setText("Scanning network for TV...");
+                  WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                  String ip = Formatter.formatIpAddress(wm.getConnectionInfo().getIpAddress());
+                  if (ip.equals("0.0.0.0")) {
+                      statusText.setText("Connect to Wi-Fi first!");
+                      return;
                   }
-                  setContentView(layout);
+                  String prefix = ip.substring(0, ip.lastIndexOf(".") + 1);
+
+                  for (int i = 1; i < 255; i++) {
+                      final String targetIp = prefix + i;
+                      executor.execute(() -> {
+                          try {
+                              Socket socket = new Socket();
+                              socket.connect(new InetSocketAddress(targetIp, 5555), 150);
+                              socket.close();
+                              runOnUiThread(() -> {
+                                  ipInput.setText(targetIp);
+                                  statusText.setText("TV Discovered: " + targetIp);
+                                  connectToTv(targetIp);
+                              });
+                          } catch (Exception ignored) {}
+                      });
+                  }
               }
 
-              private void connect() {
-                  new Thread(() -> {
+              private void connectToTv(String ip) {
+                  executor.execute(() -> {
                       try {
-                          Socket socket = new Socket(ipInput.getText().toString().trim(), 5555);
+                          Socket socket = new Socket();
+                          socket.connect(new InetSocketAddress(ip, 5555), 2000);
                           out = socket.getOutputStream();
-                          runOnUiThread(() -> Toast.makeText(this, "Connected!", Toast.LENGTH_SHORT).show());
+                          runOnUiThread(() -> statusText.setText("Connected to: " + ip));
                       } catch (Exception e) {
-                          runOnUiThread(() -> Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                          runOnUiThread(() -> statusText.setText("Connection failed: " + e.getMessage()));
                       }
-                  }).start();
+                  });
               }
 
-              private void sendKey(String key) {
-                  if (out == null) return;
-                  new Thread(() -> {
+              private void sendKey(String keycode) {
+                  sendCommand("shell:input keyevent " + keycode + "\n");
+              }
+
+              private void launchApp(String pkg) {
+                  sendCommand("shell:monkey -p " + pkg + " -c android.intent.category.LAUNCHER 1\n");
+              }
+
+              private void sendCommand(String cmd) {
+                  if (out == null) {
+                      Toast.makeText(this, "Connect to TV first!", Toast.LENGTH_SHORT).show();
+                      return;
+                  }
+                  executor.execute(() -> {
                       try {
-                          out.write(("shell:input keyevent " + key + "\n").getBytes());
+                          out.write(cmd.getBytes());
                           out.flush();
-                      } catch (Exception ignored) {}
-                  }).start();
+                      } catch (Exception e) {
+                          runOnUiThread(() -> Toast.makeText(this, "Error sending command", Toast.LENGTH_SHORT).show());
+                      }
+                  });
               }
           }
           EOF
