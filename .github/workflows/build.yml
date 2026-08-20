@@ -22,8 +22,10 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.x'
           channel: 'stable'
+
+      - name: Create Basic Android Project Structure
+        run: flutter create --platforms=android .
 
       - name: Install Dependencies
         run: flutter pub get
@@ -36,4 +38,3 @@ jobs:
         with:
           name: TV-Remote-App
           path: build/app/outputs/flutter-apk/app-release.apk
-
