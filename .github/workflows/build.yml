@@ -1,0 +1,158 @@
+name: Build Android Remote APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Initialize Android App
+        run: |
+          mkdir -p app/src/main/java/com/example/tvremote
+          
+          # Write settings.gradle
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "TVRemote"
+          include ':app'
+          EOF
+
+          # Write app/build.gradle
+          mkdir -p app
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.tvremote'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.example.tvremote"
+                  minSdk 21
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+          }
+          EOF
+
+          # Write Manifest
+          mkdir -p app/src/main
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <application
+                  android:label="TV Remote"
+                  android:theme="@android:style/Theme.DeviceDefault">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+
+          # Write MainActivity
+          cat << 'EOF' > app/src/main/java/com/example/tvremote/MainActivity.java
+          package com.example.tvremote;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.LinearLayout;
+          import android.widget.Toast;
+          import java.io.OutputStream;
+          import java.net.Socket;
+
+          public class MainActivity extends Activity {
+              private EditText ipInput;
+              private OutputStream out;
+
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  LinearLayout layout = new LinearLayout(this);
+                  layout.setOrientation(LinearLayout.VERTICAL);
+                  layout.setPadding(32, 32, 32, 32);
+
+                  ipInput = new EditText(this);
+                  ipInput.setHint("TV IP Address");
+                  layout.addView(ipInput);
+
+                  Button btnConnect = new Button(this);
+                  btnConnect.setText("Connect");
+                  btnConnect.setOnClickListener(v -> connect());
+                  layout.addView(btnConnect);
+
+                  String[] keys = {"KEYCODE_DPAD_UP", "KEYCODE_DPAD_LEFT", "KEYCODE_DPAD_CENTER", "KEYCODE_DPAD_RIGHT", "KEYCODE_DPAD_DOWN", "KEYCODE_BACK", "KEYCODE_HOME"};
+                  String[] labels = {"Up", "Left", "OK", "Right", "Down", "Back", "Home"};
+
+                  for (int i = 0; i < keys.length; i++) {
+                      final String key = keys[i];
+                      Button btn = new Button(this);
+                      btn.setText(labels[i]);
+                      btn.setOnClickListener(v -> sendKey(key));
+                      layout.addView(btn);
+                  }
+                  setContentView(layout);
+              }
+
+              private void connect() {
+                  new Thread(() -> {
+                      try {
+                          Socket socket = new Socket(ipInput.getText().toString().trim(), 5555);
+                          out = socket.getOutputStream();
+                          runOnUiThread(() -> Toast.makeText(this, "Connected!", Toast.LENGTH_SHORT).show());
+                      } catch (Exception e) {
+                          runOnUiThread(() -> Toast.makeText(this, "Error: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                      }
+                  }).start();
+              }
+
+              private void sendKey(String key) {
+                  if (out == null) return;
+                  new Thread(() -> {
+                      try {
+                          out.write(("shell:input keyevent " + key + "\n").getBytes());
+                          out.flush();
+                      } catch (Exception ignored) {}
+                  }).start();
+              }
+          }
+          EOF
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build APK
+        run: gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TV-Remote-App
+          path: app/build/outputs/apk/debug/app-debug.apk
